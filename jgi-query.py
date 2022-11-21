@@ -677,8 +677,8 @@ def download_from_url(url, timeout=120, retry=0, min_file_bytes=20, url_to_valid
     filename = re.search('.+/(.+$)', url).group(1)
     url_prefix = "https://genome.jgi.doe.gov"
     download_command = (
-        "curl -m {} '{}{}' -b cookies "
-        "> {}".format(timeout, url_prefix, url, filename)
+        "curl '{}{}' -b cookies "
+        "> {}".format(url_prefix, url, filename)
     )
     if not is_broken(filename, md5_hash=md5_hash, sizeInBytes=sizeInBytes):
         success = True
@@ -969,10 +969,11 @@ args = parser.parse_args()
 DIRECT_REGEX = args.regex
 GET_ALL = args.all
 RETRY_FROM_LOG = args.load_failed
-if GET_ALL or DIRECT_REGEX or RETRY_FROM_LOG:
-    INTERACTIVE = False
-else:
-    INTERACTIVE = True
+INTERACTIVE = False    # Force runing the script non-interactively
+# if GET_ALL or DIRECT_REGEX or RETRY_FROM_LOG:
+#     INTERACTIVE = False
+# else:
+#     INTERACTIVE = True
 
 # Check if user wants query help
 if args.syntax_help:
@@ -1090,7 +1091,7 @@ else:  # fetch XML file from JGI
     #                .format(org_url, xml_index_filename))
 
     # New syntax
-    xml_address = ("curl '{}' -L -b cookies > {}"
+    xml_address = ("curl '{}' -L -b -s cookies > {}"
                    .format(org_url, xml_index_filename))
     try:  # fails if unable to contact server
         subprocess.check_output(LOGIN_STRING, shell=True)
@@ -1112,6 +1113,13 @@ if os.path.getsize(xml_index_filename) == 0:  # happens if user and/or pw wrong
 try:
     xml_in = ET.ElementTree(file=xml_index_filename)
     xml_root = xml_in.getroot()
+    # Find 'folder' in the XML file ensuring there are files available to download
+    tag_name_ls = []
+    print(xml_index_filename)
+    for element in xml_root:
+        tag_name_ls.append(element.tag)
+    if 'folder' not in tag_name_ls:
+        clean_exit("No files and URLs in the XML file.")
 except ET.ParseError:  # organism not found/xml file contains errors
     clean_exit("Cannot parse XML file or no organism match found.\n"
               "Ensure remote file exists and has content at the "
@@ -1135,11 +1143,16 @@ if not any(v["results"] for v in list(file_list.values())):
            .format(organism, "\n".join(DESIRED_CATEGORIES))))
     clean_exit()
 
+# Skip download if 'IMG Data' is not downloadable
+if 'IMG Data' not in file_list.keys():
+    print(f'No IMG DATA to be downloaded from {organism}')
+    clean_exit()
 
 # Decision tree depending on if non-interactive options given
 regex_filter = None
-user_choice = None
+# user_choice = None
 display_info = True
+user_choice = "dummy"    # Set a random user_choice to skip the prompt
 if GET_ALL:
     user_choice = "a"
     display_info = False
@@ -1175,13 +1188,27 @@ if user_choice in ("a", "r", "l"):
             elif user_choice == "l" and u not in RETRY_FROM_LOG:
                 continue
             urls_to_get.add(u)
-else:
-    # Retrieve user-selected file urls from dict
-    ids_dict = parse_selection(user_choice)
-    for k, v in sorted(ids_dict.items()):
-        for i in v:
-            urls_to_get.add(url_dict[k][i])
+# else:
+#     # Retrieve user-selected file urls from dict
+#     ids_dict = parse_selection(user_choice)
+#     for k, v in sorted(ids_dict.items()):
+#         for i in v:
+#             urls_to_get.add(url_dict[k][i])
 
+# Force replace urls_to_get with all url under the folder 'IMG Data'
+urls_to_get = set()
+keep_pattern_ls = ['contigs.fna', 'prodigal', 'crt', '.fna']
+for folder in xml_root.iter('folder'):
+    if folder.attrib['name'] == 'IMG Data':
+        for file in folder.iter('file'):
+            for keep_pattern in keep_pattern_ls:
+                if keep_pattern in file.attrib['url']:
+                    print(file.attrib['url'])
+                    urls_to_get.add(file.attrib['url'])
+
+if not urls_to_get:
+    print('[WARNING] No file to download...')
+    clean_exit()
 
 # Calculate and display total size of selected data
 urls_to_get = sorted(urls_to_get)
@@ -1213,6 +1240,11 @@ if failed_urls and INTERACTIVE:
         downloaded_files, failed_urls = download_list(
             failed_urls, url_to_validate=url_to_validate, retries=1)
 
+# Retry downloading urls in failed_urls wihtout prompt
+if failed_urls:
+    downloaded_files, failed_urls = download_list(
+        failed_urls, url_to_validate=url_to_validate, retries=1)
+
 # Kindly offer to unpack files, if files remain after error check
 if downloaded_files and INTERACTIVE:
     decompress = input(("Decompress all downloaded files? "
@@ -1235,7 +1267,8 @@ else:
 # Clean up and exit
 # "cookies" file is always created
 exit_message = None
-remove_temp = True
+# remove_temp = True
+remove_temp = False    # Force keep temp files
 if INTERACTIVE:
     keep_temp = input("Keep temporary files ('{}' and 'cookies')? (y/n): "
                     .format(xml_index_filename))
@@ -1244,6 +1277,8 @@ if INTERACTIVE:
 elif SOME_FAILED:  # failed files in non-interactive mode
     exit_message = (
         'Some files failed downloading')
+    for i, url in enumerate(failed_urls):
+        print(f'{i}: {url}')
     remove_temp = False
 
 exit_code = 1 if SOME_FAILED else 0
